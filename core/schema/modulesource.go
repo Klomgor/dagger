@@ -18,7 +18,7 @@ import (
 	"github.com/dagger/dagger/core/modules"
 	"github.com/dagger/dagger/dagql"
 	"github.com/dagger/dagger/engine/buildkit"
-	"github.com/dagger/dagger/engine/client"
+	"github.com/dagger/dagger/engine/client/pathutil"
 	"github.com/dagger/dagger/engine/slog"
 	"github.com/dagger/dagger/engine/vcs"
 	"github.com/go-git/go-git/v5/plumbing/transport"
@@ -57,7 +57,7 @@ func (s *moduleSchema) moduleSource(ctx context.Context, query *core.Query, args
 				return nil, fmt.Errorf("failed to stat caller's current working directory: %w", err)
 			}
 
-			relPath, err := client.LexicalRelativePath(cwdStat.Path, parsed.modPath)
+			relPath, err := pathutil.LexicalRelativePath(cwdStat.Path, parsed.modPath)
 			if err != nil {
 				return nil, err
 			}
@@ -856,10 +856,15 @@ func (s *moduleSchema) moduleSourceResolveDependency(
 	// depSrc.RootSubpath is ../baz and relative to foo/bar.
 	// depSubpath is the resolved path, i.e. foo/baz.
 	depSubpath := filepath.Join(srcRootSubpath, depRootSubpath)
-
 	if !filepath.IsLocal(depSubpath) {
 		return inst, fmt.Errorf("module dep source root path %q escapes root", depRootSubpath)
 	}
+
+	srcRelHostPath, err := src.SourceRootRelSubPath()
+	if err != nil {
+		return inst, err
+	}
+	depRelHostPath := filepath.Join(srcRelHostPath, depRootSubpath)
 
 	switch src.Kind {
 	case core.ModuleSourceKindGit:
@@ -900,6 +905,7 @@ func (s *moduleSchema) moduleSourceResolveDependency(
 				Field: "moduleSource",
 				Args: []dagql.NamedInput{
 					{Name: "refString", Value: dagql.String(depSubpath)},
+					{Name: "relHostPath", Value: dagql.String(depRelHostPath)},
 				},
 			},
 			dagql.Selector{
@@ -1128,23 +1134,22 @@ func (s *moduleSchema) moduleSourceResolveFromCaller(
 		excludes = append(excludes, exclude)
 	}
 
-	bk, err := src.Query.Buildkit(ctx)
-	if err != nil {
-		return inst, fmt.Errorf("failed to get buildkit client: %w", err)
-	}
-	dgst, err := bk.LocalImport(
-		ctx,
-		src.Query.Platform().Spec(),
-		contextAbsPath,
-		excludes,
-		includes,
+	var loadedDir dagql.Instance[*core.Directory]
+	err = s.dag.Select(ctx, s.dag.Root(), &loadedDir,
+		dagql.Selector{
+			Field: "host",
+		},
+		dagql.Selector{
+			Field: "directory",
+			Args: []dagql.NamedInput{
+				{Name: "path", Value: dagql.String(contextAbsPath)},
+				{Name: "exclude", Value: dagql.ArrayInput[dagql.String](dagql.NewStringArray(excludes...))},
+				{Name: "include", Value: dagql.ArrayInput[dagql.String](dagql.NewStringArray(includes...))},
+			},
+		},
 	)
 	if err != nil {
-		return inst, fmt.Errorf("failed to import local module source: %w", err)
-	}
-	loadedDir, err := core.LoadBlob(ctx, s.dag, dgst)
-	if err != nil {
-		return inst, fmt.Errorf("failed to load local module source: %w", err)
+		return inst, fmt.Errorf("failed to create context directory: %w", err)
 	}
 
 	rootSubPath, err := src.SourceRootSubpath()
@@ -1556,16 +1561,24 @@ func (s *moduleSchema) moduleSourceResolveDirectoryFromCaller(
 		excludes = append(excludes, args.Ignore...)
 	}
 
-	dgst, err := bk.LocalImport(
-		ctx, src.Query.Platform().Spec(),
-		path,
-		excludes,
-		includes,
+	err = s.dag.Select(ctx, s.dag.Root(), &inst,
+		dagql.Selector{
+			Field: "host",
+		},
+		dagql.Selector{
+			Field: "directory",
+			Args: []dagql.NamedInput{
+				{Name: "path", Value: dagql.String(path)},
+				{Name: "exclude", Value: dagql.ArrayInput[dagql.String](dagql.NewStringArray(excludes...))},
+				{Name: "include", Value: dagql.ArrayInput[dagql.String](dagql.NewStringArray(includes...))},
+			},
+		},
 	)
 	if err != nil {
-		return inst, fmt.Errorf("failed to import local directory module arg: %w", err)
+		return inst, fmt.Errorf("failed to create context directory: %w", err)
 	}
-	return core.LoadBlob(ctx, s.dag, dgst)
+
+	return inst, nil
 }
 
 func (s *moduleSchema) moduleSourceViews(
