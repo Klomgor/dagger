@@ -17,7 +17,7 @@ concurrency:
 jobs:
     deploy:
         runs-on:
-            - ${{ github.repository == 'dagger/dagger' && 'dagger-g3-v0-15-1-4c' || 'ubuntu-latest' }}
+            - ${{ github.repository == 'dagger/dagger' && 'dagger-g3-v0-15-4-4c' || 'ubuntu-latest' }}
         name: deploy
         steps:
             - name: Checkout
@@ -33,9 +33,13 @@ jobs:
 
                 # Ensure the dir is writable otherwise fallback to tmpdir
                 if [[ ! -d "$prefix_dir" ]] || [[ ! -w "$prefix_dir" ]]; then
-                    prefix_dir="$(mktemp -d)"
+                  prefix_dir="$(mktemp -d)"
                 fi
-                printf '%s/bin' "$prefix_dir" >> $GITHUB_PATH
+                printf '%s/bin' "$prefix_dir" >>$GITHUB_PATH
+
+                if [ -f "$DAGGER_VERSION_FILE" ]; then
+                  DAGGER_VERSION=$(cat "$DAGGER_VERSION_FILE" | jq -r .engineVersion)
+                fi
 
                 # If the dagger version is 'latest', set the version back to an empty
                 # string. This allows the install script to detect and install the latest
@@ -45,9 +49,9 @@ jobs:
                 fi
 
                 # The install.sh script creates path ${prefix_dir}/bin
-                curl -fsS https://dl.dagger.io/dagger/install.sh | BIN_DIR=${prefix_dir}/bin sh
+                curl -fsS https://dl.dagger.io/dagger/install.sh | BIN_DIR=${prefix_dir}/bin DAGGER_VERSION=$DAGGER_VERSION sh
               env:
-                DAGGER_VERSION: v0.15.1
+                DAGGER_VERSION: v0.15.4
               shell: bash
             - name: scripts/warm-engine.sh
               id: warm-engine
@@ -96,8 +100,13 @@ jobs:
                     mkfifo stdout.fifo stderr.fifo
 
                     # Set up tee to capture and display stdout and stderr
-                    tee stdout.txt < stdout.fifo &
-                    tee stderr.txt < stderr.fifo >&2 &
+                    if [ -n "$NO_OUTPUT" ]; then
+                        tee stdout.txt < stdout.fifo > /dev/null &
+                        tee stderr.txt < stderr.fifo > /dev/null &
+                    else
+                        tee stdout.txt < stdout.fifo &
+                        tee stderr.txt < stderr.fifo >&2 &
+                    fi
                 )
 
                 # Run the command, capturing stdout and stderr in the FIFOs
@@ -179,6 +188,9 @@ jobs:
 
                 } >"${GITHUB_STEP_SUMMARY}"
 
+                echo "stdout_file=$tmp/stdout.txt" >>"$GITHUB_OUTPUT"
+                echo "stderr_file=$tmp/stderr.txt" >>"$GITHUB_OUTPUT"
+
                 exit $EXIT_CODE
               env:
                 _EXPERIMENTAL_DAGGER_CLOUD_TOKEN: dag_dagger_sBIv6DsjNerWvTqt2bSFeigBUqWxp9bhh3ONSSgeFnw
@@ -187,4 +199,4 @@ jobs:
                 DAGGER_MODULE: modules/daggerverse
                 RELEASE_DAGGER_CI_TOKEN: ${{ secrets.RELEASE_DAGGER_CI_TOKEN }}
               shell: bash
-        timeout-minutes: 10
+        timeout-minutes: 20

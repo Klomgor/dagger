@@ -1,7 +1,9 @@
 {
   "name": "dagger-dev",
-  "engineVersion": "v0.15.1",
-  "sdk": "go",
+  "engineVersion": "v0.15.4",
+  "sdk": {
+    "source": "go"
+  },
   "dependencies": [
     {
       "name": "alpine",
@@ -51,10 +53,6 @@
     {
       "name": "python-sdk-dev",
       "source": "sdk/python/dev"
-    },
-    {
-      "name": "releaser",
-      "source": "releaser"
     },
     {
       "name": "shellcheck",

@@ -1,6 +1,8 @@
 {
   "name": "golangci",
-  "engineVersion": "v0.12.4",
-  "sdk": "go",
+  "engineVersion": "v0.15.3",
+  "sdk": {
+    "source": "go"
+  },
   "source": "."
 }
