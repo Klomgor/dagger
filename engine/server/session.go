@@ -14,7 +14,6 @@ import (
 	"time"
 
 	"dagger.io/dagger/telemetry"
-	"github.com/99designs/gqlgen/graphql/handler"
 	"github.com/Khan/genqlient/graphql"
 	"github.com/containerd/containerd/content"
 	"github.com/koron-go/prefixw"
@@ -131,6 +130,10 @@ type daggerClient struct {
 
 	// if the client is coming from a module, this is that module
 	mod *core.Module
+	// during module initialization, we don't have a full module yet but need to call
+	// a function to get the module typedefs. In this case mod is nil but modName
+	// will be set to allow SDKs to get the module name during that call if needed.
+	modName string
 
 	// the DAG of modules being served to this client
 	deps *core.ModDeps
@@ -405,6 +408,11 @@ type ClientInitOpts struct {
 	// that this client should have access to due to being set in the parent
 	// object.
 	ParentIDs map[digest.Digest]*resource.ID
+
+	// corner case: when initializing a module by calling it to get its typedefs, we don't actually
+	// have a full EncodedModuleID yet, but some SDKs still call CurrentModule.name then. For this
+	// case we just provide the ModuleName and use that to support CurrentModule.name.
+	ModuleName string
 }
 
 // requires that client.stateMu is held
@@ -415,7 +423,7 @@ func (srv *Server) initializeDaggerClient(
 	opts *ClientInitOpts,
 ) error {
 	// initialize all the buildkit+session attachable state for the client
-	client.secretStore = core.NewSecretStore()
+	client.secretStore = core.NewSecretStore(srv.bkSessionManager)
 	client.socketStore = core.NewSocketStore(srv.bkSessionManager)
 	if opts.CallID != nil {
 		if opts.CallerClientID == "" {
@@ -556,6 +564,8 @@ func (srv *Server) initializeDaggerClient(
 	}
 	client.defaultDeps = core.NewModDeps(client.dagqlRoot, []core.Mod{coreMod})
 
+	client.modName = opts.ModuleName
+
 	if opts.EncodedModuleID == "" {
 		client.deps = core.NewModDeps(client.dagqlRoot, []core.Mod{coreMod})
 		coreMod.Dag.View = engine.BaseVersion(engine.NormalizeVersion(client.clientVersion))
@@ -572,10 +582,7 @@ func (srv *Server) initializeDaggerClient(
 
 		// this is needed to set the view of the core api as compatible
 		// with the module we're currently calling from
-		engineVersion, err := client.mod.Source.Self.ModuleEngineVersion(ctx)
-		if err != nil {
-			return err
-		}
+		engineVersion := client.mod.Source.Self.EngineVersion
 		coreMod.Dag.View = engine.BaseVersion(engine.NormalizeVersion(engineVersion))
 
 		// NOTE: *technically* we should reload the module here, so that we can
@@ -905,6 +912,7 @@ func (srv *Server) ServeHTTPToNestedClient(w http.ResponseWriter, r *http.Reques
 		EncodedModuleID:     execMD.EncodedModuleID,
 		EncodedFunctionCall: execMD.EncodedFunctionCall,
 		ParentIDs:           execMD.ParentIDs,
+		ModuleName:          execMD.ModuleName,
 	}).ServeHTTP(w, r)
 }
 
@@ -1090,7 +1098,7 @@ func (srv *Server) serveQuery(w http.ResponseWriter, r *http.Request, client *da
 		return gqlErr(fmt.Errorf("failed to get schema: %w", err), http.StatusBadRequest)
 	}
 
-	gqlSrv := handler.NewDefaultServer(schema)
+	gqlSrv := dagql.NewDefaultHandler(schema)
 	// NB: break glass when needed:
 	// gqlSrv.AroundResponses(func(ctx context.Context, next graphql.ResponseHandler) *graphql.Response {
 	// 	res := next(ctx)
@@ -1228,11 +1236,15 @@ func (srv *Server) CurrentModule(ctx context.Context) (*core.Module, error) {
 	if client.clientID == client.daggerSession.mainClientCallerID {
 		return nil, fmt.Errorf("%w: main client caller has no current module", core.ErrNoCurrentModule)
 	}
-	if client.mod == nil {
-		return nil, core.ErrNoCurrentModule
+	if client.mod != nil {
+		return client.mod, nil
 	}
 
-	return client.mod, nil
+	if client.modName != "" {
+		return &core.Module{NameField: client.modName}, nil
+	}
+
+	return nil, core.ErrNoCurrentModule
 }
 
 // If the current client is coming from a function, return the function call metadata

@@ -11,7 +11,7 @@ import (
 	"dagger.io/dagger"
 	"github.com/creack/pty"
 	"github.com/dagger/dagger/internal/testutil"
-	"github.com/dagger/dagger/testctx"
+	"github.com/dagger/testctx"
 	"github.com/stretchr/testify/require"
 )
 
@@ -149,6 +149,27 @@ func (ContainerSuite) TestSystemCACerts(ctx context.Context, t *testctx.T) {
 			require.NoError(t, err)
 			require.NotEmpty(t, bundleContents)
 			require.NotContains(t, bundleContents, f.caCertContents)
+		}},
+
+		caCertsTest{"wolfi basic", func(t *testctx.T, c *dagger.Client, f caCertsTestFixtures) {
+			ctr := c.Container().From(wolfiImage).
+				WithExec([]string{"apk", "add", "curl"})
+			initialBundleContents, err := ctr.File("/etc/ssl/certs/ca-certificates.crt").Contents(ctx)
+			require.NoError(t, err)
+
+			ctr, err = ctr.
+				WithExec([]string{"curl", "https://server"}).
+				Sync(ctx)
+			require.NoError(t, err)
+
+			// verify no system CAs are leftover
+			_, err = ctr.Directory("/usr/local/share/ca-certificates").Entries(ctx)
+			requireErrOut(t, err, "no such file or directory")
+
+			bundleContents, err := ctr.File("/etc/ssl/certs/ca-certificates.crt").Contents(ctx)
+			require.NoError(t, err)
+			require.NotContains(t, bundleContents, f.caCertContents)
+			require.Equal(t, initialBundleContents, bundleContents)
 		}},
 
 		caCertsTest{"debian basic", func(t *testctx.T, c *dagger.Client, f caCertsTestFixtures) {

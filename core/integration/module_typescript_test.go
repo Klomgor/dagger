@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/dagger/dagger/testctx"
+	"github.com/dagger/testctx"
 	"github.com/stretchr/testify/require"
 	"github.com/tidwall/gjson"
 )
@@ -15,7 +15,7 @@ import (
 type TypescriptSuite struct{}
 
 func TestTypescript(t *testing.T) {
-	testctx.Run(testCtx, t, TypescriptSuite{}, Middleware()...)
+	testctx.New(t, Middleware()...).RunTests(TypescriptSuite{})
 }
 
 func (TypescriptSuite) TestInit(ctx context.Context, t *testctx.T) {
@@ -202,32 +202,6 @@ func (TypescriptSuite) TestInit(ctx context.Context, t *testctx.T) {
 		sourcePackageJSON, err := modGen.File("./dagger/package.json").Contents(ctx)
 		require.NoError(t, err)
 		require.Contains(t, sourcePackageJSON, `"packageManager": "yarn@`) // We don't check the exact version because it's a SHA
-	})
-
-	t.Run("fail if --merge is specified", func(ctx context.Context, t *testctx.T) {
-		c := connect(ctx, t)
-
-		modGen := c.Container().From(golangImage).
-			WithMountedFile(testCLIBinPath, daggerCliFile(t, c)).
-			WithWorkdir("/work").
-			WithNewFile("/work/package.json", `{
-  "name": "my-module",
-  "version": "1.0.0",
-  "description": "My module",
-  "main": "index.js",
-  "scripts": {
-  "test": "echo \"Error: no test specified\" && exit 1"
-  },
-  "author": "John doe",
-  "license": "MIT"
-  }`,
-			).
-			With(daggerExec("init", "--source=.", "--merge", "--name=hasPkgJson", "--sdk=typescript"))
-
-		_, err := modGen.
-			With(daggerQuery(`{hasPkgJson{containerEcho(stringArg:"hello"){stdout}}}`)).
-			Stdout(ctx)
-		requireErrOut(t, err, "merge is only supported")
 	})
 
 	t.Run("init module in .dagger if files present in current dir", func(ctx context.Context, t *testctx.T) {
@@ -1879,5 +1853,30 @@ export class Test {
 		require.Equal(t, "A simple Duck interface", schema.Get("interfaces.#.asInterface|#(name=TestDuck).description").String())
 		require.Equal(t, "A small quack sound", schema.Get("interfaces.#.asInterface|#(name=TestDuck).functions.#(name=quack).description").String())
 		require.Equal(t, "A super quack sound", schema.Get("interfaces.#.asInterface|#(name=TestDuck).functions.#(name=superQuack).description").String())
+	})
+}
+
+func (TypescriptSuite) TestFloatReturnTypeSuggestion(ctx context.Context, t *testctx.T) {
+	t.Run("suggest to use float instead of number if function returns a float", func(ctx context.Context, t *testctx.T) {
+		c := connect(ctx, t)
+
+		modGen := c.Container().From(golangImage).
+			WithMountedFile(testCLIBinPath, daggerCliFile(t, c)).
+			WithWorkdir("/work").
+			With(daggerExec("init", "--name=test", "--sdk=typescript", "--source=.")).
+			With(sdkSource("typescript", `import { dag, object, func } from "@dagger.io/dagger"
+
+@object()
+export class Test {
+  @func()
+  test(): number {
+    return 4.4
+  }
+}
+		
+		`))
+
+		_, err := modGen.With(daggerCall("test")).Stdout(ctx)
+		requireErrOut(t, err, "Error: cannot return float '4.4' if return type is 'number' (integer), please use 'float' as return type instead")
 	})
 }

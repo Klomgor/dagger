@@ -18,8 +18,7 @@ const (
 )
 
 type PhpSdk struct {
-	SourceDir     *dagger.Directory
-	RequiredPaths []string
+	SourceDir *dagger.Directory
 }
 
 func New(
@@ -33,8 +32,7 @@ func New(
 		return nil, fmt.Errorf("sdk source directory not provided")
 	}
 	return &PhpSdk{
-		RequiredPaths: []string{},
-		SourceDir:     sdkSourceDir,
+		SourceDir: sdkSourceDir,
 	}, nil
 }
 
@@ -126,7 +124,7 @@ func (m *PhpSdk) CodegenBase(
 		WithWorkdir(srcPath).
 		WithExec([]string{"/init-template.sh", name}).
 		// composer install adds the lock file so we want this even in Codegen.
-		WithExec([]string{"composer", "install"}).
+		WithExec([]string{"composer", "update", "--with-all-dependencies", "--minimal-changes", "dagger/dagger"}).
 		WithEntrypoint([]string{filepath.Join(srcPath, "entrypoint.php")})
 
 	return ctr, nil

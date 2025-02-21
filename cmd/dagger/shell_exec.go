@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -12,6 +11,7 @@ import (
 
 	"dagger.io/dagger"
 	"dagger.io/dagger/querybuilder"
+	"dagger.io/dagger/telemetry"
 	"github.com/spf13/pflag"
 	"mvdan.cc/sh/v3/interp"
 )
@@ -32,7 +32,7 @@ func (h *shellCallHandler) Exec(next interp.ExecHandlerFunc) interp.ExecHandlerF
 		// This avoids interpreter builtins running first, which would make it
 		// impossible to have a function named "echo", for example. We can
 		// remove `.dag` from this point onward.
-		if args[0] == ".dag" {
+		if args[0] == shellInternalCmd {
 			args = args[1:]
 		}
 
@@ -59,7 +59,7 @@ func (h *shellCallHandler) Exec(next interp.ExecHandlerFunc) interp.ExecHandlerF
 			// Ensure any error from the handler is written to stdout so that
 			// the next command in the chain knows about it.
 			if e := (ShellState{Error: &m}.Write(ctx)); e != nil {
-				return fmt.Errorf("failed to encode error (%q): %w", m, e)
+				return e
 			}
 			// There's a bug in the library where a handler that does `return err`
 			// is fatal but NewExitStatus` is not. With a fatal error, if this
@@ -212,13 +212,13 @@ func (h *shellCallHandler) stateLookup(ctx context.Context, name string) (*Shell
 	// 4. Path to local or remote module source
 	// (local paths are relative to the current working directory, not the loaded module)
 	st, err := h.getOrInitDefState(name, func() (*moduleDef, error) {
-		return tryInitializeModule(ctx, h.dag, name)
+		return initializeModule(ctx, h.dag, name)
 	})
+	if st == nil || (err != nil && strings.Contains(err.Error(), "does not exist")) {
+		return nil, fmt.Errorf("function or module %q not found", name)
+	}
 	if err != nil {
 		return nil, err
-	}
-	if st == nil {
-		return nil, fmt.Errorf("function or module %q not found", name)
 	}
 	return st, nil
 }
@@ -274,8 +274,12 @@ func (h *shellCallHandler) functionCall(ctx context.Context, st *ShellState, nam
 //
 // Additionally, if there's only one required argument that is a list of strings,
 // all positional arguments are used as elements of that list.
-func shellPreprocessArgs(fn *modFunction, args []string) ([]string, error) {
+func shellPreprocessArgs(ctx context.Context, fn *modFunction, args []string) ([]string, error) {
 	flags := pflag.NewFlagSet(fn.CmdName(), pflag.ContinueOnError)
+	flags.SetOutput(io.MultiWriter(
+		interp.HandlerCtx(ctx).Stderr,
+		telemetry.SpanStdio(ctx, InstrumentationLibrary).Stderr,
+	))
 
 	opts := fn.OptionalArgs()
 
@@ -301,7 +305,7 @@ func shellPreprocessArgs(fn *modFunction, args []string) ([]string, error) {
 	}
 
 	if err := flags.Parse(args); err != nil {
-		return args, err
+		return args, checkErrHelp(err, args)
 	}
 
 	reqs := fn.RequiredArgs()
@@ -362,9 +366,28 @@ func shellPreprocessArgs(fn *modFunction, args []string) ([]string, error) {
 	return a, nil
 }
 
+// checkErrHelp circumvents pflag's special cases for -h and --help
+//
+// This returns the same error as any other unknown flag.
+func checkErrHelp(err error, args []string) error {
+	if !errors.Is(err, pflag.ErrHelp) {
+		return err
+	}
+	// Avoid considering flags from a with-exec for example, although if this
+	// error is raised it's surely defined before `--`.
+	if i := slices.Index(args, "--"); i > 0 {
+		args = args[:i]
+	}
+	// Shorthand flags are parsed first
+	if slices.Contains(args, "-h") {
+		return errors.New(`unknown shorthand flag: "-h"`)
+	}
+	return errors.New(`unknown flag: "--help"`)
+}
+
 // parseArgumentValues returns a map of argument names and their parsed values
 func (h *shellCallHandler) parseArgumentValues(ctx context.Context, md *moduleDef, fn *modFunction, args []string) (map[string]any, error) {
-	newArgs, err := shellPreprocessArgs(fn, args)
+	newArgs, err := shellPreprocessArgs(ctx, fn, args)
 	if err != nil {
 		return nil, err
 	}
@@ -374,7 +397,10 @@ func (h *shellCallHandler) parseArgumentValues(ctx context.Context, md *moduleDe
 	}
 
 	flags := pflag.NewFlagSet(fn.CmdName(), pflag.ContinueOnError)
-	flags.SetOutput(interp.HandlerCtx(ctx).Stderr)
+	flags.SetOutput(io.MultiWriter(
+		interp.HandlerCtx(ctx).Stderr,
+		telemetry.SpanStdio(ctx, InstrumentationLibrary).Stderr,
+	))
 
 	// Add flags for each argument, including unsupported ones, which we
 	// assume it's being supported through some other means, so we just
@@ -432,7 +458,7 @@ func (h *shellCallHandler) parseArgumentValues(ctx context.Context, md *moduleDe
 		return nil
 	}
 	if err := flags.ParseAll(newArgs, f); err != nil {
-		return nil, err
+		return nil, checkErrHelp(err, newArgs)
 	}
 
 	// Finally, get the values from the flags that haven't been resolved yet.
@@ -489,7 +515,7 @@ func (h *shellCallHandler) parseFlagValue(ctx context.Context, value string, arg
 
 		return q, nil
 	}
-	v, err := h.Result(ctx, strings.NewReader(value), false, handleObjectID)
+	v, _, err := h.Result(ctx, strings.NewReader(value), handleObjectID)
 	return v, bypass, err
 }
 
@@ -498,35 +524,32 @@ func (h *shellCallHandler) Result(
 	ctx context.Context,
 	// r is the reader to read the shell state from
 	r io.Reader,
-	// doPrintResponse prepares the response for printing according to an output
-	// format
-	doPrintResponse bool,
-	// beforeRequest is a callback that allows modifying the query before making
+	// doPrintResponse prep	// beforeRequest is a callback that allows modifying the query before making
 	// the request
 	//
 	// It's also useful for validating the query with the function's
 	// return type.
 	beforeRequest func(context.Context, *querybuilder.Selection, *modTypeDef) (*querybuilder.Selection, error),
-) (any, error) {
+) (any, *modTypeDef, error) {
 	st, b, err := readShellState(r)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if st == nil {
-		return string(b), nil
+		return string(b), nil, nil
 	}
 
 	if st.IsCommandRoot() {
 		switch {
 		case st.IsStdlib():
-			return h.CommandsList(st.Cmd, h.Stdlib()), nil
+			return h.CommandsList(st.Cmd, h.Stdlib()), nil, nil
 		case st.IsDeps():
-			return h.DependenciesList(), nil
+			return h.DependenciesList(), nil, nil
 		case st.IsCore():
 			def := h.modDef(nil)
-			return h.FunctionsList(st.Cmd, def.GetCoreFunctions()), nil
+			return h.FunctionsList(st.Cmd, def.GetCoreFunctions()), nil, nil
 		default:
-			return nil, fmt.Errorf("unexpected namespace %q", st.Cmd)
+			return nil, nil, fmt.Errorf("unexpected namespace %q", st.Cmd)
 		}
 	}
 
@@ -536,20 +559,20 @@ func (h *shellCallHandler) Result(
 	if def.HasModule() && st.IsEmpty() {
 		st, err = h.constructorCall(ctx, def, st, nil)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 	}
 
 	fn, err := st.Function().GetDef(def)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	q := st.QueryBuilder(h.dag)
 	if beforeRequest != nil {
 		q, err = beforeRequest(ctx, q, fn.ReturnType)
 		if err != nil {
-			return nil, err
+			return nil, fn.ReturnType, err
 		}
 	}
 
@@ -558,29 +581,20 @@ func (h *shellCallHandler) Result(
 	// possible  that a pipeline ending in an object doesn't have anything
 	// to sub-select.
 	if q == nil {
-		return nil, nil
+		return nil, fn.ReturnType, nil
 	}
 
 	var response any
 
 	if err := makeRequest(ctx, q, &response); err != nil {
-		return nil, err
+		return nil, fn.ReturnType, err
 	}
 
 	if fn.ReturnType.Kind == dagger.TypeDefKindVoidKind {
-		return nil, nil
+		return nil, fn.ReturnType, nil
 	}
 
-	if doPrintResponse {
-		buf := new(bytes.Buffer)
-		frmt := outputFormat(fn.ReturnType)
-		if err := printResponse(buf, response, frmt); err != nil {
-			return nil, err
-		}
-		return buf.String(), nil
-	}
-
-	return response, nil
+	return response, fn.ReturnType, nil
 }
 
 func (h *shellCallHandler) getOrInitDef(ref string, fn func() (*moduleDef, error)) (*moduleDef, error) {
@@ -671,11 +685,9 @@ func (h *shellCallHandler) GetDependency(ctx context.Context, name string) (*She
 		return nil, nil, fmt.Errorf("dependency %q not found", name)
 	}
 	st, err := h.getOrInitDefState(dep.ModRef, func() (*moduleDef, error) {
-		var opts []dagger.ModuleSourceOpts
-		if dep.RefPin != "" {
-			opts = append(opts, dagger.ModuleSourceOpts{RefPin: dep.RefPin})
-		}
-		return initializeModule(ctx, h.dag, dep.ModRef, false, opts...)
+		return initializeModule(ctx, h.dag, dep.ModRef, dagger.ModuleSourceOpts{
+			DisableFindUp: true,
+		})
 	})
 	if err != nil {
 		return nil, nil, err

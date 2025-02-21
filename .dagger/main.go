@@ -7,7 +7,6 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/containerd/platforms"
 	"github.com/dagger/dagger/.dagger/internal/dagger"
 	"golang.org/x/sync/errgroup"
 )
@@ -66,6 +65,9 @@ func New(
 			continue
 		}
 		if strings.HasPrefix(module, "core/integration/") {
+			continue
+		}
+		if strings.HasPrefix(module, "dagql/idtui/viztest/broken/") {
 			continue
 		}
 		dev.ModCodegenTargets = append(dev.ModCodegenTargets, module)
@@ -165,6 +167,11 @@ func (dev *DaggerDev) Test() *Test {
 	return &Test{Dagger: dev}
 }
 
+// Run all benchmarks
+func (dev *DaggerDev) Bench() *Bench {
+	return &Bench{Test: dev.Test()}
+}
+
 // Run all code generation - SDKs, docs, etc
 func (dev *DaggerDev) Generate(ctx context.Context) (*dagger.Directory, error) {
 	var docs, sdks, engine *dagger.Directory
@@ -172,19 +179,26 @@ func (dev *DaggerDev) Generate(ctx context.Context) (*dagger.Directory, error) {
 
 	eg.Go(func() error {
 		var err error
-		docs, err = dev.Docs().Generate(ctx)
+		docs = dev.Docs().Generate()
+		docs, err = docs.Sync(ctx)
 		return err
 	})
 
 	eg.Go(func() error {
 		var err error
 		sdks, err = dev.SDK().All().Generate(ctx)
+		if err != nil {
+			return err
+		}
+		sdks, err = sdks.Sync(ctx)
 		return err
 	})
 
 	eg.Go(func() error {
+		var err error
 		engine = dev.Engine().Generate()
-		return nil
+		docs, err = engine.Sync(ctx)
+		return err
 	})
 
 	if err := eg.Wait(); err != nil {
@@ -209,11 +223,6 @@ func (dev *DaggerDev) SDK() *SDK {
 		Java:       &JavaSDK{Dagger: dev},
 		Dotnet:     &DotnetSDK{Dagger: dev},
 	}
-}
-
-// Run Dagger release-related tasks
-func (dev *DaggerDev) Release() *Release {
-	return &Release{SDK: dev.SDK(), Docs: dev.Docs()}
 }
 
 // Creates a dev container that has a running CLI connected to a dagger engine
@@ -251,70 +260,6 @@ func (dev *DaggerDev) Dev(
 		WithServiceBinding("dagger-engine", svc).
 		WithEnvVariable("_EXPERIMENTAL_DAGGER_RUNNER_HOST", endpoint).
 		WithWorkdir("/mnt"), nil
-}
-
-// Creates an static dev build
-func (dev *DaggerDev) DevExport(
-	ctx context.Context,
-	// +optional
-	platform dagger.Platform,
-
-	// +optional
-	race bool,
-	// +optional
-	trace bool,
-
-	// Set target distro
-	// +optional
-	image *Distro,
-	// Enable experimental GPU support
-	// +optional
-	gpuSupport bool,
-) (*dagger.Directory, error) {
-	var platformSpec platforms.Platform
-	if platform == "" {
-		platformSpec = platforms.DefaultSpec()
-	} else {
-		var err error
-		platformSpec, err = platforms.Parse(string(platform))
-		if err != nil {
-			return nil, err
-		}
-	}
-
-	engine := dev.Engine()
-	if race {
-		engine = engine.WithRace()
-	}
-	if trace {
-		engine = engine.WithTrace()
-	}
-	enginePlatformSpec := platformSpec
-	enginePlatformSpec.OS = "linux"
-	engineCtr, err := engine.Container(ctx, dagger.Platform(platforms.Format(enginePlatformSpec)), image, gpuSupport)
-	if err != nil {
-		return nil, err
-	}
-	engineTar := engineCtr.AsTarball(dagger.ContainerAsTarballOpts{
-		// use gzip to avoid incompatibility w/ older docker versions
-		ForcedCompression: dagger.ImageLayerCompressionGzip,
-	})
-
-	// FIXME: get path from the cli file (windows is already handled)
-	hostCliPath := "dagger"
-	if platformSpec.OS == "windows" {
-		hostCliPath += ".exe"
-	}
-	dir := dag.Directory().
-		WithFile("engine.tar", engineTar).
-		WithFile(hostCliPath, dag.DaggerCli().Binary(dagger.DaggerCliBinaryOpts{Platform: platform}))
-
-	// this allows our integration tests to plumb built cli binaries into containers when the host OS doesn't match
-	if platformSpec.OS != "linux" {
-		linuxCliPath := "dagger-linux"
-		dir = dir.WithFile(linuxCliPath, engineCtr.File(cliPath))
-	}
-	return dir, nil
 }
 
 func (dev *DaggerDev) withDockerCfg(ctr *dagger.Container) *dagger.Container {

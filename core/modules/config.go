@@ -3,6 +3,7 @@ package modules
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 )
 
 // Filename is the name of the module config file.
@@ -21,13 +22,10 @@ type ModuleConfig struct {
 	EngineVersion string `json:"engineVersion"`
 
 	// The SDK this module uses
-	SDK string `json:"sdk,omitempty"`
+	SDK *SDK `json:"sdk,omitempty"`
 
 	// Paths to explicitly include from the module, relative to the configuration file.
 	Include []string `json:"include,omitempty"`
-
-	// Paths to explicitly exclude from the module, relative to the configuration file.
-	Exclude []string `json:"exclude,omitempty"`
 
 	// The modules this module depends on.
 	Dependencies []*ModuleConfigDependency `json:"dependencies,omitempty"`
@@ -35,12 +33,47 @@ type ModuleConfig struct {
 	// The path, relative to this config file, to the subdir containing the module's implementation source code.
 	Source string `json:"source,omitempty"`
 
-	// Named views defined for this module, which are sets of directory filters that can be applied to
-	// directory arguments provided to functions.
-	Views []*ModuleConfigView `json:"views,omitempty"`
-
 	// Codegen configuration for this module.
 	Codegen *ModuleCodegenConfig `json:"codegen,omitempty"`
+
+	// Paths to explicitly exclude from the module, relative to the configuration file.
+	// Deprecated: Use !<pattern> in the include list instead.
+	Exclude []string `json:"exclude,omitempty"`
+}
+
+// SDK represents the sdk field in dagger.json
+// The source can be reference to a built-in sdk e.g. go, php, elixir or
+// can be a reference to a git path e.g. github.com/username/reponame/sdk-name
+type SDK struct {
+	Source string `json:"source"`
+}
+
+func (sdk *SDK) UnmarshalJSON(data []byte) error {
+	if sdk == nil {
+		return fmt.Errorf("cannot unmarshal into nil SDK")
+	}
+	if len(data) == 0 {
+		sdk.Source = ""
+		return nil
+	}
+
+	// check if this is a legacy config, where sdk was a string
+	if data[0] == '"' {
+		var sdkRefStr string
+		if err := json.Unmarshal(data, &sdkRefStr); err != nil {
+			return fmt.Errorf("unmarshal sdk as string: %w", err)
+		}
+		*sdk = SDK{Source: sdkRefStr}
+		return nil
+	}
+
+	type alias SDK // lets us use the default json unmashaler
+	var tmp alias
+	if err := json.Unmarshal(data, &tmp); err != nil {
+		return fmt.Errorf("unmarshal sdk as struct: %w", err)
+	}
+	*sdk = SDK(tmp)
+	return nil
 }
 
 type ModuleConfigUserFields struct {
@@ -71,9 +104,22 @@ func (modCfg *ModuleConfig) UnmarshalJSON(data []byte) error {
 
 	// Detect the case where SDK is set but Source isn't, which should only happen when loading an older config.
 	// For those cases, the Source was implicitly ".", so set it to that.
-	if tmp.SDK != "" && tmp.Source == "" {
+	if tmp.SDK != nil && tmp.SDK.Source != "" && tmp.Source == "" {
 		tmp.Source = "."
 	}
+
+	// adapt exclude to include
+	for _, exclude := range tmp.Exclude {
+		if len(exclude) == 0 {
+			continue
+		}
+		if strings.HasPrefix(exclude, "!") {
+			tmp.Include = append(tmp.Include, exclude[1:])
+		} else {
+			tmp.Include = append(tmp.Include, "!"+exclude)
+		}
+	}
+	tmp.Exclude = nil
 
 	*modCfg = ModuleConfig(tmp)
 	return nil
@@ -153,4 +199,13 @@ type ModuleConfigView struct {
 type ModuleCodegenConfig struct {
 	// Whether to automatically generate a .gitignore file for this module.
 	AutomaticGitignore *bool `json:"automaticGitignore,omitempty"`
+}
+
+func (cfg ModuleCodegenConfig) Clone() *ModuleCodegenConfig {
+	if cfg.AutomaticGitignore == nil {
+		return &cfg
+	}
+	clone := *cfg.AutomaticGitignore
+	cfg.AutomaticGitignore = &clone
+	return &cfg
 }

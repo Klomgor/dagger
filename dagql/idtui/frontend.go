@@ -11,7 +11,6 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/dustin/go-humanize"
 	"github.com/muesli/termenv"
-	"github.com/opencontainers/go-digest"
 	"go.opentelemetry.io/otel/log"
 	sdklog "go.opentelemetry.io/otel/sdk/log"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
@@ -64,6 +63,8 @@ type Frontend interface {
 
 	// Opts returns the opts of the currently running frontend.
 	Opts() *dagui.FrontendOpts
+	SetCustomExit(fn func())
+	SetVerbosity(n int)
 
 	// SetPrimary tells the frontend which span should be treated like the focal
 	// point of the command. Its output will be displayed at the end, and its
@@ -308,11 +309,6 @@ func (r *renderer) renderLiteral(out *termenv.Output, lit *callpbv1.Literal) {
 	case *callpbv1.Literal_Float:
 		fmt.Fprint(out, out.String(fmt.Sprintf("%f", val.Float)).Foreground(termenv.ANSIRed))
 	case *callpbv1.Literal_String_:
-		if r.maxLiteralLen != -1 && len(val.Value()) > r.maxLiteralLen {
-			display := string(digest.FromString(val.Value()))
-			fmt.Fprint(out, out.String("ETOOBIG:"+display).Foreground(termenv.ANSIYellow))
-			return
-		}
 		fmt.Fprint(out, out.String(fmt.Sprintf("%q", val.String_)).Foreground(termenv.ANSIYellow))
 	case *callpbv1.Literal_CallDigest:
 		fmt.Fprint(out, out.String(val.CallDigest).Foreground(termenv.ANSIMagenta))

@@ -6,12 +6,15 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
 
 	"dagger.io/dagger"
 	"dagger.io/dagger/telemetry"
+	"github.com/dagger/dagger/dagql/dagui"
 	"github.com/iancoleman/strcase"
 	"github.com/spf13/pflag"
 )
@@ -36,7 +39,7 @@ func initializeDefaultModule(ctx context.Context, dag *dagger.Client) (*moduleDe
 	if modRef == "" {
 		modRef = moduleURLDefault
 	}
-	return initializeModule(ctx, dag, modRef, true)
+	return initializeModule(ctx, dag, modRef)
 }
 
 // maybeInitializeDefaultModule optionally loads the module referenced by the -m,--mod flag,
@@ -46,7 +49,13 @@ func maybeInitializeDefaultModule(ctx context.Context, dag *dagger.Client) (*mod
 	if modRef == "" {
 		modRef = moduleURLDefault
 	}
-	return maybeInitializeModule(ctx, dag, modRef)
+
+	if def, err := initializeModule(ctx, dag, modRef); def != nil {
+		return def, modRef, err
+	}
+
+	def, err := initializeCore(ctx, dag)
+	return def, "", err
 }
 
 // initializeModule loads the module at the given source ref
@@ -56,68 +65,31 @@ func initializeModule(
 	ctx context.Context,
 	dag *dagger.Client,
 	srcRef string,
-	doFindUp bool,
 	srcOpts ...dagger.ModuleSourceOpts,
 ) (rdef *moduleDef, rerr error) {
 	ctx, span := Tracer().Start(ctx, "load module")
 	defer telemetry.End(span, func() error { return rerr })
 
 	findCtx, findSpan := Tracer().Start(ctx, "finding module configuration", telemetry.Encapsulate())
-	conf, err := getModuleConfigurationForSourceRef(findCtx, dag, srcRef, doFindUp, true, srcOpts...)
+	modSrc := dag.ModuleSource(srcRef, srcOpts...)
+	configExists, err := modSrc.ConfigExists(findCtx)
 	telemetry.End(findSpan, func() error { return err })
 
 	if err != nil {
 		return nil, fmt.Errorf("failed to get configured module: %w", err)
 	}
-	if !conf.FullyInitialized() {
-		return nil, fmt.Errorf("module must be fully initialized")
+	if !configExists {
+		return nil, fmt.Errorf("module not found: %s", srcRef)
 	}
 
-	return initializeModuleConfig(ctx, dag, conf)
-}
-
-// maybeInitializeModule optionally loads the module at the given source ref,
-// falling back to the core definitions if the module isn't found
-func maybeInitializeModule(ctx context.Context, dag *dagger.Client, srcRef string) (*moduleDef, string, error) {
-	if def, err := tryInitializeModule(ctx, dag, srcRef); def != nil || err != nil {
-		return def, srcRef, err
-	}
-
-	def, err := initializeCore(ctx, dag)
-	return def, "", err
-}
-
-// tryInitializeModule tries to load a module if it exists
-//
-// Returns an error if the module is invalid or couldn't be loaded, but not
-// if the module wasn't found.
-func tryInitializeModule(ctx context.Context, dag *dagger.Client, srcRef string) (rdef *moduleDef, rerr error) {
-	ctx, span := Tracer().Start(ctx, "looking for module")
-	defer telemetry.End(span, func() error { return rerr })
-
-	findCtx, findSpan := Tracer().Start(ctx, "finding module configuration", telemetry.Encapsulate())
-	conf, _ := getModuleConfigurationForSourceRef(findCtx, dag, srcRef, true, true)
-	findSpan.End()
-
-	if conf == nil || !conf.FullyInitialized() {
-		return nil, nil
-	}
-
-	span.SetName("load module " + srcRef)
-
-	return initializeModuleConfig(ctx, dag, conf)
-}
-
-// initializeModuleConfig loads a module using a detected module configuration
-func initializeModuleConfig(ctx context.Context, dag *dagger.Client, conf *configuredModule) (rdef *moduleDef, rerr error) {
 	serveCtx, serveSpan := Tracer().Start(ctx, "initializing module", telemetry.Encapsulate())
-	err := conf.Source.AsModule().Initialize().Serve(serveCtx)
+	err = modSrc.AsModule().Serve(serveCtx)
 	telemetry.End(serveSpan, func() error { return err })
 	if err != nil {
 		return nil, fmt.Errorf("failed to serve module: %w", err)
 	}
 
-	def, err := inspectModule(ctx, dag, conf.Source)
+	def, err := inspectModule(ctx, dag, modSrc)
 	if err != nil {
 		return nil, err
 	}
@@ -184,11 +156,10 @@ func inspectModule(ctx context.Context, dag *dagger.Client, source *dagger.Modul
 	var res struct {
 		Source struct {
 			AsString string
+			Kind     dagger.ModuleSourceKind
 			Module   struct {
-				Name       string
-				Initialize struct {
-					Description string
-				}
+				Name         string
+				Description  string
 				Dependencies []struct {
 					Name        string
 					Description string
@@ -232,8 +203,22 @@ func inspectModule(ctx context.Context, dag *dagger.Client, source *dagger.Modul
 		Source:       source,
 		ModRef:       res.Source.AsString,
 		Name:         res.Source.Module.Name,
-		Description:  res.Source.Module.Initialize.Description,
+		Description:  res.Source.Module.Description,
 		Dependencies: deps,
+	}
+
+	// if this is a local module source, make the mod ref relative to the caller
+	// since that is usually a shorter+easier to work with path
+	if res.Source.Kind == dagger.ModuleSourceKindLocalSource {
+		cwd, err := os.Getwd()
+		if err != nil {
+			return nil, err
+		}
+		relPath, err := filepath.Rel(cwd, def.ModRef)
+		if err != nil {
+			return nil, err
+		}
+		def.ModRef = relPath
 	}
 
 	return def, nil
@@ -509,36 +494,35 @@ func (m *moduleDef) HasFunction(fp functionProvider, name string) bool {
 // object type with with one from the module's object type definitions, to
 // recover missing function definitions in those places when chaining functions.
 func (m *moduleDef) LoadTypeDef(typeDef *modTypeDef) {
-	typeDef.mu.Lock()
-	defer typeDef.mu.Unlock()
-
-	if typeDef.AsObject != nil && typeDef.AsObject.Functions == nil && typeDef.AsObject.Fields == nil {
-		obj := m.GetObject(typeDef.AsObject.Name)
-		if obj != nil {
-			typeDef.AsObject = obj
+	typeDef.once.Do(func() {
+		if typeDef.AsObject != nil && typeDef.AsObject.Functions == nil && typeDef.AsObject.Fields == nil {
+			obj := m.GetObject(typeDef.AsObject.Name)
+			if obj != nil {
+				typeDef.AsObject = obj
+			}
 		}
-	}
-	if typeDef.AsInterface != nil && typeDef.AsInterface.Functions == nil {
-		iface := m.GetInterface(typeDef.AsInterface.Name)
-		if iface != nil {
-			typeDef.AsInterface = iface
+		if typeDef.AsInterface != nil && typeDef.AsInterface.Functions == nil {
+			iface := m.GetInterface(typeDef.AsInterface.Name)
+			if iface != nil {
+				typeDef.AsInterface = iface
+			}
 		}
-	}
-	if typeDef.AsEnum != nil {
-		enum := m.GetEnum(typeDef.AsEnum.Name)
-		if enum != nil {
-			typeDef.AsEnum = enum
+		if typeDef.AsEnum != nil {
+			enum := m.GetEnum(typeDef.AsEnum.Name)
+			if enum != nil {
+				typeDef.AsEnum = enum
+			}
 		}
-	}
-	if typeDef.AsInput != nil && typeDef.AsInput.Fields == nil {
-		input := m.GetInput(typeDef.AsInput.Name)
-		if input != nil {
-			typeDef.AsInput = input
+		if typeDef.AsInput != nil && typeDef.AsInput.Fields == nil {
+			input := m.GetInput(typeDef.AsInput.Name)
+			if input != nil {
+				typeDef.AsInput = input
+			}
 		}
-	}
-	if typeDef.AsList != nil {
-		m.LoadTypeDef(typeDef.AsList.ElementTypeDef)
-	}
+		if typeDef.AsList != nil {
+			m.LoadTypeDef(typeDef.AsList.ElementTypeDef)
+		}
+	})
 }
 
 func (m *moduleDef) LoadFunctionTypeDefs(fn *modFunction) {
@@ -561,8 +545,8 @@ type modTypeDef struct {
 	AsScalar    *modScalar
 	AsEnum      *modEnum
 
-	// mu protects concurrent update from LoadTypeDef
-	mu sync.Mutex
+	// once protects concurrent update from LoadTypeDef
+	once sync.Once
 }
 
 func (t *modTypeDef) String() string {
@@ -571,6 +555,8 @@ func (t *modTypeDef) String() string {
 		return "string"
 	case dagger.TypeDefKindIntegerKind:
 		return "int"
+	case dagger.TypeDefKindFloatKind:
+		return "float"
 	case dagger.TypeDefKindBooleanKind:
 		return "bool"
 	case dagger.TypeDefKindVoidKind:
@@ -598,6 +584,7 @@ func (t *modTypeDef) KindDisplay() string {
 	switch t.Kind {
 	case dagger.TypeDefKindStringKind,
 		dagger.TypeDefKindIntegerKind,
+		dagger.TypeDefKindFloatKind,
 		dagger.TypeDefKindBooleanKind:
 		return "Scalar"
 	case dagger.TypeDefKindScalarKind,
@@ -622,6 +609,7 @@ func (t *modTypeDef) Description() string {
 	switch t.Kind {
 	case dagger.TypeDefKindStringKind,
 		dagger.TypeDefKindIntegerKind,
+		dagger.TypeDefKindFloatKind,
 		dagger.TypeDefKindBooleanKind:
 		return "Primitive type."
 	case dagger.TypeDefKindVoidKind:
@@ -672,7 +660,7 @@ func GetSupportedFunctions(fp functionProvider) ([]*modFunction, []string) {
 	fns := make([]*modFunction, 0, len(allFns))
 	skipped := make([]string, 0, len(allFns))
 	for _, fn := range allFns {
-		if skipFunction(fp.ProviderName(), fn.Name) || fn.HasUnsupportedFlags() {
+		if dagui.ShouldSkipFunction(fp.ProviderName(), fn.Name) || fn.HasUnsupportedFlags() {
 			skipped = append(skipped, fn.CmdName())
 		} else {
 			fns = append(fns, fn)
@@ -691,33 +679,6 @@ func GetSupportedFunction(md *moduleDef, fp functionProvider, name string) (*mod
 		return nil, fmt.Errorf("function %q in type %q is not supported", name, fp.ProviderName())
 	}
 	return fn, nil
-}
-
-func skipFunction(obj, field string) bool {
-	// TODO: make this configurable in the API but may not be easy to
-	// generalize because an "internal" field may still need to exist in
-	// codegen, for example. Could expose if internal via the TypeDefs though.
-	skip := map[string][]string{
-		"Query": {
-			// for SDKs only
-			"builtinContainer",
-			"generatedCode",
-			"currentFunctionCall",
-			"currentModule",
-			"typeDef",
-			// not useful until the CLI accepts ID inputs
-			"cacheVolume",
-			"setSecret",
-			// for tests only
-			"secret",
-			// deprecated
-			"pipeline",
-		},
-	}
-	if fields, ok := skip[obj]; ok {
-		return slices.Contains(fields, field)
-	}
-	return false
 }
 
 // skipLeaves is a map of provider names to function names that should be skipped

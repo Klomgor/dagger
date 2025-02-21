@@ -1,7 +1,13 @@
 {
   "name": "dagger-dev",
-  "engineVersion": "v0.15.1",
-  "sdk": "go",
+  "engineVersion": "v0.16.1",
+  "sdk": {
+    "source": "go"
+  },
+  "include": [
+    "engine/distconsts/**/*",
+    "sdk/typescript/runtime/**/*"
+  ],
   "dependencies": [
     {
       "name": "alpine",
@@ -51,10 +57,6 @@
     {
       "name": "python-sdk-dev",
       "source": "sdk/python/dev"
-    },
-    {
-      "name": "releaser",
-      "source": "releaser"
     },
     {
       "name": "shellcheck",

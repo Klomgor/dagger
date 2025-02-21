@@ -3,11 +3,13 @@ package main
 import (
 	"context"
 	"fmt"
+	"io"
 	"os/exec"
 	"slices"
 	"sort"
 	"strings"
 
+	"dagger.io/dagger/telemetry"
 	"github.com/spf13/cobra"
 	"mvdan.cc/sh/v3/interp"
 )
@@ -152,7 +154,7 @@ func (c *ShellCommand) Execute(ctx context.Context, h *shellCallHandler, args []
 	for i, arg := range args {
 		if strings.HasPrefix(arg, shellStatePrefix) {
 			w := strings.NewReader(arg)
-			v, err := h.Result(ctx, w, false, nil)
+			v, _, err := h.Result(ctx, w, nil)
 			if err != nil {
 				return fmt.Errorf("cannot expand command argument at %d", i)
 			}
@@ -178,7 +180,7 @@ func (h *shellCallHandler) BuiltinCommand(name string) (*ShellCommand, error) {
 			return c, nil
 		}
 	}
-	return nil, fmt.Errorf("command not found %q", name)
+	return nil, fmt.Errorf("command not found: %q", name)
 }
 
 func (h *shellCallHandler) StdlibCommand(name string) (*ShellCommand, error) {
@@ -187,7 +189,7 @@ func (h *shellCallHandler) StdlibCommand(name string) (*ShellCommand, error) {
 			return c, nil
 		}
 	}
-	return nil, fmt.Errorf("command not found %q", name)
+	return nil, fmt.Errorf("command not found: %q", name)
 }
 
 func (h *shellCallHandler) Builtins() []*ShellCommand {
@@ -238,7 +240,7 @@ func (h *shellCallHandler) registerCommands() { //nolint:gocyclo
 						return err
 					}
 					if c == nil {
-						err = fmt.Errorf("command not found %q", args[0])
+						err = fmt.Errorf("command not found: %q", args[0])
 						if !strings.HasPrefix(args[0], ".") {
 							if builtin, _ := h.BuiltinCommand("." + args[0]); builtin != nil {
 								err = fmt.Errorf("%w, did you mean %q?", err, "."+args[0])
@@ -393,7 +395,7 @@ to the currently loaded module.
 			State:   NoState,
 			Run: func(ctx context.Context, cmd *ShellCommand, args []string, _ *ShellState) error {
 				st, err := h.getOrInitDefState(args[0], func() (*moduleDef, error) {
-					return initializeModule(ctx, h.dag, args[0], true)
+					return initializeModule(ctx, h.dag, args[0])
 				})
 				if err != nil {
 					return err
@@ -538,8 +540,9 @@ func cobraToShellCommand(c *cobra.Command) *ShellCommand {
 			args = append([]string{c.Name()}, args...)
 			hctx := interp.HandlerCtx(ctx)
 			c := exec.CommandContext(ctx, "dagger", args...)
-			c.Stdout = hctx.Stdout
-			c.Stderr = hctx.Stderr
+			stdio := telemetry.SpanStdio(ctx, InstrumentationLibrary)
+			c.Stdout = io.MultiWriter(hctx.Stdout, stdio.Stdout)
+			c.Stderr = io.MultiWriter(hctx.Stderr, stdio.Stderr)
 			c.Stdin = hctx.Stdin
 			return c.Run()
 		},

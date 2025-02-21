@@ -8,7 +8,6 @@ import (
 	"dagger/helm/internal/dagger"
 
 	"github.com/moby/buildkit/identity"
-	"golang.org/x/mod/semver"
 	"helm.sh/helm/v3/pkg/chart"
 	"sigs.k8s.io/yaml"
 )
@@ -113,7 +112,9 @@ func runDaggerQuery(ctx context.Context, engineName string, engineKind string, k
 		return err
 	}
 
-	stdout, err := kubectl.WithEnvVariable("_EXPERIMENTAL_DAGGER_RUNNER_HOST", fmt.Sprintf("kube-pod://%s?namespace=dagger", podName)).
+	stdout, err := kubectl.
+		WithEnvVariable("_EXPERIMENTAL_DAGGER_RUNNER_HOST", fmt.Sprintf("kube-pod://%s?namespace=dagger", podName)).
+		WithEnvVariable("_EXPERIMENTAL_DAGGER_MIN_VERSION", "v0.16.0-000000000000").
 		WithExec([]string{"dagger", "query"}, dagger.ContainerWithExecOpts{
 			Stdin: `{
 				container {
@@ -190,14 +191,9 @@ func (h *Helm) Publish(
 	// The git ref to publish
 	// eg. "helm/dagger/v0.13.0"
 	target string,
-	// +optional
-	// +default="https://github.com/dagger/dagger.git"
-	gitRepoSource string,
 
 	// +optional
 	githubToken *dagger.Secret,
-	// +optional
-	discordWebhook *dagger.Secret,
 
 	// Test as much as possible without actually publishing anything
 	// +optional
@@ -225,25 +221,5 @@ func (h *Helm) Publish(
 			return c.WithExec([]string{"sh", "-c", script})
 		}).
 		Sync(ctx)
-	if err != nil {
-		return err
-	}
-	// 2. Publish on github release
-	if semver.IsValid(version) {
-		if err := dag.Releaser().GithubRelease(ctx, gitRepoSource, "helm/chart/"+version, target, dagger.ReleaserGithubReleaseOpts{
-			Notes:  dag.Releaser().ChangeNotes("helm/dagger", version),
-			Token:  githubToken,
-			DryRun: dryRun,
-		}); err != nil {
-			return err
-		}
-
-		if err := dag.Releaser().Notify(ctx, gitRepoSource, "helm/chart/"+version, "☸️ Helm Chart", dagger.ReleaserNotifyOpts{
-			DiscordWebhook: discordWebhook,
-			DryRun:         dryRun,
-		}); err != nil {
-			return err
-		}
-	}
-	return nil
+	return err
 }

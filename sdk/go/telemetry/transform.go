@@ -967,8 +967,14 @@ func ReexportLogsFromPB(ctx context.Context, exp sdklog.Exporter, req *collogspb
 			)
 			for _, rec := range scopeLog.GetLogRecords() {
 				var logRec log.Record
-				tid := trace.TraceID(rec.GetTraceId())
-				sid := trace.SpanID(rec.GetSpanId())
+				var tid trace.TraceID
+				var sid trace.SpanID
+				if rec.GetTraceId() != nil {
+					tid = trace.TraceID(rec.GetTraceId())
+				}
+				if rec.GetSpanId() != nil {
+					sid = trace.SpanID(rec.GetSpanId())
+				}
 				emitCtx := trace.ContextWithSpanContext(ctx, trace.NewSpanContext(trace.SpanContextConfig{
 					TraceID: tid,
 					SpanID:  sid,
@@ -992,8 +998,8 @@ type collectLogProcessor struct {
 
 var _ sdklog.Processor = (*collectLogProcessor)(nil)
 
-func (p *collectLogProcessor) OnEmit(ctx context.Context, record sdklog.Record) error {
-	p.logs = append(p.logs, record)
+func (p *collectLogProcessor) OnEmit(ctx context.Context, record *sdklog.Record) error {
+	p.logs = append(p.logs, *record)
 	return nil
 }
 

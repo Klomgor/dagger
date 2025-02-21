@@ -40,12 +40,6 @@ func Close() error {
 	return err
 }
 
-// Retrieves a content-addressed blob.
-func Blob(digest string) *dagger.Directory {
-	client := initClient()
-	return client.Blob(digest)
-}
-
 // Retrieves a container builtin to the engine.
 func BuiltinContainer(digest string) *dagger.Container {
 	client := initClient()
@@ -254,12 +248,6 @@ func LoadGeneratedCodeFromID(id dagger.GeneratedCodeID) *dagger.GeneratedCode {
 	return client.LoadGeneratedCodeFromID(id)
 }
 
-// Load a GitModuleSource from its ID.
-func LoadGitModuleSourceFromID(id dagger.GitModuleSourceID) *dagger.GitModuleSource {
-	client := initClient()
-	return client.LoadGitModuleSourceFromID(id)
-}
-
 // Load a GitRef from its ID.
 func LoadGitRefFromID(id dagger.GitRefID) *dagger.GitRef {
 	client := initClient()
@@ -302,18 +290,6 @@ func LoadListTypeDefFromID(id dagger.ListTypeDefID) *dagger.ListTypeDef {
 	return client.LoadListTypeDefFromID(id)
 }
 
-// Load a LocalModuleSource from its ID.
-func LoadLocalModuleSourceFromID(id dagger.LocalModuleSourceID) *dagger.LocalModuleSource {
-	client := initClient()
-	return client.LoadLocalModuleSourceFromID(id)
-}
-
-// Load a ModuleDependency from its ID.
-func LoadModuleDependencyFromID(id dagger.ModuleDependencyID) *dagger.ModuleDependency {
-	client := initClient()
-	return client.LoadModuleDependencyFromID(id)
-}
-
 // Load a Module from its ID.
 func LoadModuleFromID(id dagger.ModuleID) *dagger.Module {
 	client := initClient()
@@ -324,12 +300,6 @@ func LoadModuleFromID(id dagger.ModuleID) *dagger.Module {
 func LoadModuleSourceFromID(id dagger.ModuleSourceID) *dagger.ModuleSource {
 	client := initClient()
 	return client.LoadModuleSourceFromID(id)
-}
-
-// Load a ModuleSourceView from its ID.
-func LoadModuleSourceViewFromID(id dagger.ModuleSourceViewID) *dagger.ModuleSourceView {
-	client := initClient()
-	return client.LoadModuleSourceViewFromID(id)
 }
 
 // Load a ObjectTypeDef from its ID.
@@ -344,6 +314,12 @@ func LoadPortFromID(id dagger.PortID) *dagger.Port {
 	return client.LoadPortFromID(id)
 }
 
+// Load a SDKConfig from its ID.
+func LoadSDKConfigFromID(id dagger.SDKConfigID) *dagger.SDKConfig {
+	client := initClient()
+	return client.LoadSDKConfigFromID(id)
+}
+
 // Load a ScalarTypeDef from its ID.
 func LoadScalarTypeDefFromID(id dagger.ScalarTypeDefID) *dagger.ScalarTypeDef {
 	client := initClient()
@@ -354,6 +330,12 @@ func LoadScalarTypeDefFromID(id dagger.ScalarTypeDefID) *dagger.ScalarTypeDef {
 func LoadSecretFromID(id dagger.SecretID) *dagger.Secret {
 	client := initClient()
 	return client.LoadSecretFromID(id)
+}
+
+// Load a Secret from its Name.
+func LoadSecretFromName(name string, opts ...dagger.LoadSecretFromNameOpts) *dagger.Secret {
+	client := initClient()
+	return client.LoadSecretFromName(name, opts...)
 }
 
 // Load a Service from its ID.
@@ -392,22 +374,16 @@ func Module() *dagger.Module {
 	return client.Module()
 }
 
-// Create a new module dependency configuration from a module source and name
-func ModuleDependency(source *dagger.ModuleSource, opts ...dagger.ModuleDependencyOpts) *dagger.ModuleDependency {
-	client := initClient()
-	return client.ModuleDependency(source, opts...)
-}
-
-// Create a new module source instance from a source ref string.
+// Create a new module source instance from a source ref string
 func ModuleSource(refString string, opts ...dagger.ModuleSourceOpts) *dagger.ModuleSource {
 	client := initClient()
 	return client.ModuleSource(refString, opts...)
 }
 
-// Reference a secret by name.
-func Secret(name string, opts ...dagger.SecretOpts) *dagger.Secret {
+// Creates a new secret.
+func Secret(uri string) *dagger.Secret {
 	client := initClient()
-	return client.Secret(name, opts...)
+	return client.Secret(uri)
 }
 
 // Sets a secret given a user defined name to its plaintext and returns the secret.
